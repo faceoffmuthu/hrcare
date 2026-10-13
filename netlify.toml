@@ -1,0 +1,20 @@
+[build]
+  command = "npm --prefix backend ci && node scripts/build-netlify.mjs"
+  publish = "netlify-dist"
+  functions = "backend/netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["express", "serverless-http", "pg", "pdf-parse"]
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/api/:splat"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
+  force = false
