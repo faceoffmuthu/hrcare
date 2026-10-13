@@ -16,12 +16,10 @@ services:
         sync: false
       - key: DATABASE_SSL
         value: "true"
+      - key: S3_REGION
+        value: "us-east-2"
       - key: SESSION_SECRET
         generateValue: true
-      - key: EMAIL_FROM
-        sync: false
-      - key: RESEND_API_KEY
-        sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET

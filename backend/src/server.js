@@ -28,17 +28,17 @@ const sessionDays = 14;
 const encryptionKey = crypto.createHash('sha256').update(process.env.SESSION_SECRET || 'local-only-session-secret-change-me').digest();
 if (production && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32)) throw new Error('SESSION_SECRET must contain at least 32 characters in production.');
 if (production) {
-  const missing=['APP_ORIGIN','DATABASE_URL','EMAIL_FROM','S3_BUCKET','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY'].filter(key=>!process.env[key]);
-  if(!process.env.RESEND_API_KEY&&!process.env.SMTP_HOST)missing.push('RESEND_API_KEY or SMTP_HOST');
+  const missing=['APP_ORIGIN','DATABASE_URL','S3_BUCKET','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY'].filter(key=>!process.env[key]);
   if(missing.length)throw new Error(`Missing required production configuration: ${missing.join(', ')}`);
   if(!process.env.APP_ORIGIN.startsWith('https://'))throw new Error('APP_ORIGIN must use HTTPS in production.');
 }
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined, max: Number(process.env.PG_POOL_MAX || (process.env.NETLIFY ? 2 : 10)) });
 let registrationResumeSchemaReady;
 const ensureRegistrationResumeSchema = () => registrationResumeSchemaReady ||= pool.query(`create table if not exists registration_resume_staging (user_id uuid primary key references app_users(id) on delete cascade, resume_key text not null, resume_name text not null, expires_at timestamptz not null default now() + interval '7 days', created_at timestamptz not null default now())`).catch(error=>{registrationResumeSchemaReady=undefined;throw error});
-const s3 = process.env.S3_BUCKET ? new S3Client({ region: process.env.S3_REGION || 'auto', endpoint: process.env.S3_ENDPOINT || undefined, credentials: process.env.S3_ACCESS_KEY_ID ? { accessKeyId: process.env.S3_ACCESS_KEY_ID, secretAccessKey: process.env.S3_SECRET_ACCESS_KEY } : undefined }) : null;
+const s3 = process.env.S3_BUCKET ? new S3Client({ region: process.env.S3_REGION || 'auto', endpoint: process.env.S3_ENDPOINT || undefined, forcePathStyle: Boolean(process.env.S3_ENDPOINT), credentials: process.env.S3_ACCESS_KEY_ID ? { accessKeyId: process.env.S3_ACCESS_KEY_ID, secretAccessKey: process.env.S3_SECRET_ACCESS_KEY } : undefined }) : null;
 const localResumeRoot = !production && process.env.LOCAL_RESUME_DIR ? path.resolve(process.env.LOCAL_RESUME_DIR) : null;
 const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({ host: process.env.SMTP_HOST, port: Number(process.env.SMTP_PORT || 587), secure: Number(process.env.SMTP_PORT) === 465, auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD } : undefined }) : null;
+const mailConfigured = Boolean(process.env.EMAIL_FROM && (process.env.RESEND_API_KEY || mailer));
 const b64url = (input) => Buffer.from(input).toString('base64url');
 const digest = (input) => crypto.createHash('sha256').update(input).digest('hex');
 const opaqueToken = () => b64url(crypto.randomBytes(32));
@@ -49,6 +49,7 @@ const decryptSecret = (value) => { const [iv,tag,data]=value.split('.').map(x=>B
 const clean = (x, max = 500) => typeof x === 'string' ? x.trim().slice(0, max) : '';
 const emailOk = (x) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x) && x.length <= 254;
 const sendMail = async (to, subject, text) => {
+  if (!mailConfigured) throw Object.assign(new Error('Email delivery is not configured.'), { status: 503 });
   if (process.env.RESEND_API_KEY) {
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -175,7 +176,7 @@ app.post('/api/auth/register', registrationUpload.single('resume'), async (req, 
     const token = opaqueToken();
     await client.query(`insert into auth_tokens(token_hash,user_id,purpose,expires_at) values($1,$2,'verify_email',now()+interval '1 day')`, [digest(token), user.id]);
     await client.query('commit');
-    let emailSent = true;
+    let emailSent = mailConfigured;
     try { await sendMail(email, 'Verify your HRs Portal email', `Use this link to verify your email: ${webUrl(`/?auth=verify&token=${encodeURIComponent(token)}`)}\nThis link expires in 24 hours.`); } catch (mailError) { emailSent = false; console.error('Verification email delivery failed:', mailError.message); }
     const verificationUrl = !emailSent && !production && localResumeRoot ? webUrl(`/?auth=verify&token=${encodeURIComponent(token)}`) : undefined;
     const message = accountType === 'company'
