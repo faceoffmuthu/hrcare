@@ -159,7 +159,9 @@ app.post('/api/auth/register', registrationUpload.single('resume'), async (req, 
     if(role==='candidate')await ensureRegistrationResumeSchema();
     await client.query('begin');
     const hash = await passwordHash(password);
-    const user = (await client.query('insert into app_users(email,password_hash) values($1,$2) returning id,email', [email, hash])).rows[0];
+    // While no mail provider is configured, allow account setup without proving email ownership.
+    // Adding EMAIL_FROM and a mail provider re-enables verification for new accounts.
+    const user = (await client.query('insert into app_users(email,password_hash,email_verified_at) values($1,$2,$3) returning id,email', [email, hash, mailConfigured ? null : new Date()])).rows[0];
     await client.query(`insert into user_profiles(id,full_name,account_role,account_status) values($1,$2,$3,'pending_terms')`, [user.id, fullName, role]);
     if (accountType === 'company') {
       const company = (await client.query(`insert into companies(created_by,name,website,verification_status) values($1,$2,$3,'pending') returning id`, [user.id, companyName, companyWebsite || null])).rows[0];
@@ -173,15 +175,15 @@ app.post('/api/auth/register', registrationUpload.single('resume'), async (req, 
       await saveResume(storedResumeKey, resumeFile.buffer, mimeByExt[ext]);
       await client.query('insert into registration_resume_staging(user_id,resume_key,resume_name) values($1,$2,$3)', [user.id, storedResumeKey, resumeFile.originalname.slice(0, 200)]);
     }
-    const token = opaqueToken();
-    await client.query(`insert into auth_tokens(token_hash,user_id,purpose,expires_at) values($1,$2,'verify_email',now()+interval '1 day')`, [digest(token), user.id]);
+    const token = mailConfigured ? opaqueToken() : null;
+    if (token) await client.query(`insert into auth_tokens(token_hash,user_id,purpose,expires_at) values($1,$2,'verify_email',now()+interval '1 day')`, [digest(token), user.id]);
     await client.query('commit');
     let emailSent = mailConfigured;
-    try { await sendMail(email, 'Verify your HRs Portal email', `Use this link to verify your email: ${webUrl(`/?auth=verify&token=${encodeURIComponent(token)}`)}\nThis link expires in 24 hours.`); } catch (mailError) { emailSent = false; console.error('Verification email delivery failed:', mailError.message); }
+    if (token) try { await sendMail(email, 'Verify your HRs Portal email', `Use this link to verify your email: ${webUrl(`/?auth=verify&token=${encodeURIComponent(token)}`)}\nThis link expires in 24 hours.`); } catch (mailError) { emailSent = false; console.error('Verification email delivery failed:', mailError.message); }
     const verificationUrl = !emailSent && !production && localResumeRoot ? webUrl(`/?auth=verify&token=${encodeURIComponent(token)}`) : undefined;
     const message = accountType === 'company'
       ? emailSent ? 'Company request received. Verify your email; company and recruiter access stay pending until HRs Portal reviews them.' : verificationUrl ? 'Company request received. Use the local verification link; company and recruiter access stay pending until HRs Portal reviews them.' : 'Company request received, but the verification email could not be sent. Access remains pending until HRs Portal reviews the company.'
-      : emailSent ? 'Check your inbox for an email verification link.' : verificationUrl ? 'Local mode: use the verification link below to activate this account.' : 'Your account was created, but the verification email could not be sent. Use Resend verification after email delivery is configured.';
+      : emailSent ? 'Check your inbox for an email verification link.' : verificationUrl ? 'Local mode: use the verification link below to activate this account.' : 'Your account was created. Email verification is currently disabled.';
     res.status(201).json({ message, ...(verificationUrl ? { verificationUrl } : {}) });
   } catch (e) { await client.query('rollback'); if (storedResumeKey) await deleteResume(storedResumeKey).catch(()=>{}); if (e.code === '23505') return res.status(409).json({ error: 'If this address can be registered, check its inbox for next steps.' }); next(e); }
   finally { client.release(); }
@@ -199,6 +201,11 @@ app.post('/api/auth/login', async (req, res, next) => {
     if (!rows[0]?.password_hash || !(await passwordMatches(String(password || ''),rows[0].password_hash))) return res.status(401).json({ error: 'Email or password could not be confirmed.' });
     if (!canAccessLoginPortal(portal, rows[0])) return res.status(403).json({ error: 'This account is not assigned to that sign-in portal. Use the correct portal or contact HRs Portal support.' });
     await pool.query('update app_users set last_sign_in_at=now() where id=$1', [rows[0].id]);
+    if (!mailConfigured && !rows[0].email_verified_at) {
+      await pool.query('update app_users set email_verified_at=now() where id=$1', [rows[0].id]);
+      await pool.query(`update user_profiles set account_status=case when terms_accepted_at is null then 'pending_terms' when account_role='recruiter' then 'pending_approval' else 'active' end,updated_at=now() where id=$1`, [rows[0].id]);
+      rows[0].email_verified_at = new Date();
+    }
     const isPlatformAdmin = ['admin', 'super_admin'].includes(rows[0].platform_role) && rows[0].platform_status === 'active';
     await createSession(rows[0].id, res, !isPlatformAdmin);
     const profile = (await pool.query('select id,full_name,account_role,account_status,onboarding_completed_at from user_profiles where id=$1', [rows[0].id])).rows[0];
