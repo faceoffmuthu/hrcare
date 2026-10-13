@@ -184,7 +184,7 @@ app.post('/api/auth/register', registrationUpload.single('resume'), async (req, 
     const message = accountType === 'company'
       ? emailSent ? 'Company request received. Verify your email; company and recruiter access stay pending until HRs Portal reviews them.' : verificationUrl ? 'Company request received. Use the local verification link; company and recruiter access stay pending until HRs Portal reviews them.' : 'Company request received, but the verification email could not be sent. Access remains pending until HRs Portal reviews the company.'
       : emailSent ? 'Check your inbox for an email verification link.' : verificationUrl ? 'Local mode: use the verification link below to activate this account.' : 'Your account was created. Email verification is currently disabled.';
-    res.status(201).json({ message, ...(verificationUrl ? { verificationUrl } : {}) });
+    res.status(201).json({ message, emailVerificationRequired: mailConfigured, ...(verificationUrl ? { verificationUrl } : {}) });
   } catch (e) { await client.query('rollback'); if (storedResumeKey) await deleteResume(storedResumeKey).catch(()=>{}); if (e.code === '23505') return res.status(409).json({ error: 'If this address can be registered, check its inbox for next steps.' }); next(e); }
   finally { client.release(); }
 });
