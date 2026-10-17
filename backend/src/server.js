@@ -23,22 +23,25 @@ const { Pool } = pg;
 const app = express();
 const origin = process.env.APP_ORIGIN;
 const production = process.env.NODE_ENV === 'production';
+const developerMode = process.env.NODE_ENV === 'development';
 const cookieName = process.env.COOKIE_NAME || 'hrs_session';
 const sessionDays = 14;
 const encryptionKey = crypto.createHash('sha256').update(process.env.SESSION_SECRET || 'local-only-session-secret-change-me').digest();
 if (production && (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32)) throw new Error('SESSION_SECRET must contain at least 32 characters in production.');
 if (production) {
-  const missing=['APP_ORIGIN','DATABASE_URL','S3_BUCKET','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY'].filter(key=>!process.env[key]);
+  const missing=['APP_ORIGIN','DATABASE_URL','EMAIL_FROM','S3_BUCKET','S3_ACCESS_KEY_ID','S3_SECRET_ACCESS_KEY'].filter(key=>!process.env[key]);
+  if(!process.env.RESEND_API_KEY&&!process.env.SMTP_HOST)missing.push('RESEND_API_KEY or SMTP_HOST');
   if(missing.length)throw new Error(`Missing required production configuration: ${missing.join(', ')}`);
   if(!process.env.APP_ORIGIN.startsWith('https://'))throw new Error('APP_ORIGIN must use HTTPS in production.');
 }
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined, max: Number(process.env.PG_POOL_MAX || (process.env.NETLIFY ? 2 : 10)) });
 let registrationResumeSchemaReady;
 const ensureRegistrationResumeSchema = () => registrationResumeSchemaReady ||= pool.query(`create table if not exists registration_resume_staging (user_id uuid primary key references app_users(id) on delete cascade, resume_key text not null, resume_name text not null, expires_at timestamptz not null default now() + interval '7 days', created_at timestamptz not null default now())`).catch(error=>{registrationResumeSchemaReady=undefined;throw error});
-const s3 = process.env.S3_BUCKET ? new S3Client({ region: process.env.S3_REGION || 'auto', endpoint: process.env.S3_ENDPOINT || undefined, forcePathStyle: Boolean(process.env.S3_ENDPOINT), credentials: process.env.S3_ACCESS_KEY_ID ? { accessKeyId: process.env.S3_ACCESS_KEY_ID, secretAccessKey: process.env.S3_SECRET_ACCESS_KEY } : undefined }) : null;
+let workspaceProjectsSchemaReady;
+const ensureWorkspaceProjectsSchema = () => workspaceProjectsSchemaReady ||= pool.query(`create table if not exists workspace_projects (id uuid primary key default gen_random_uuid(), owner_id uuid not null references app_users(id) on delete cascade, project_type text not null check (project_type in ('assistant_plan','resume','portfolio','learning','hiring_role','marketplace_request','provider_profile','video_storyboard')), title text not null check (char_length(title) between 1 and 160), status text not null default 'draft' check (status in ('draft','review','ready','archived')), content jsonb not null default '{}'::jsonb, created_at timestamptz not null default now(), updated_at timestamptz not null default now())`).then(()=>pool.query('create index if not exists workspace_projects_owner_type_idx on workspace_projects(owner_id,project_type,updated_at desc)')).catch(error=>{workspaceProjectsSchemaReady=undefined;throw error});
+const s3 = process.env.S3_BUCKET ? new S3Client({ region: process.env.S3_REGION || 'auto', endpoint: process.env.S3_ENDPOINT || undefined, credentials: process.env.S3_ACCESS_KEY_ID ? { accessKeyId: process.env.S3_ACCESS_KEY_ID, secretAccessKey: process.env.S3_SECRET_ACCESS_KEY } : undefined }) : null;
 const localResumeRoot = !production && process.env.LOCAL_RESUME_DIR ? path.resolve(process.env.LOCAL_RESUME_DIR) : null;
 const mailer = process.env.SMTP_HOST ? nodemailer.createTransport({ host: process.env.SMTP_HOST, port: Number(process.env.SMTP_PORT || 587), secure: Number(process.env.SMTP_PORT) === 465, auth: process.env.SMTP_USER ? { user: process.env.SMTP_USER, pass: process.env.SMTP_PASSWORD } : undefined }) : null;
-const mailConfigured = Boolean(process.env.EMAIL_FROM && (process.env.RESEND_API_KEY || mailer));
 const b64url = (input) => Buffer.from(input).toString('base64url');
 const digest = (input) => crypto.createHash('sha256').update(input).digest('hex');
 const opaqueToken = () => b64url(crypto.randomBytes(32));
@@ -49,7 +52,6 @@ const decryptSecret = (value) => { const [iv,tag,data]=value.split('.').map(x=>B
 const clean = (x, max = 500) => typeof x === 'string' ? x.trim().slice(0, max) : '';
 const emailOk = (x) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(x) && x.length <= 254;
 const sendMail = async (to, subject, text) => {
-  if (!mailConfigured) throw Object.assign(new Error('Email delivery is not configured.'), { status: 503 });
   if (process.env.RESEND_API_KEY) {
     const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
@@ -115,7 +117,7 @@ app.use('/api', async (req, res, next) => {
   } catch (err) { next(err); }
 });
 const requireAuth = (req, res, next) => req.auth ? next() : res.status(401).json({ error: 'Sign in again to continue.' });
-const requireVerified = (req, res, next) => req.auth?.email_verified_at ? next() : res.status(403).json({ error: 'Verify your email before continuing.' });
+const requireVerified = (req, res, next) => req.auth?.email_verified_at || developerMode ? next() : res.status(403).json({ error: 'Verify your email before continuing.' });
 const requireAdmin = async (req, res, next) => {
   if (!req.auth?.email_verified_at || !req.auth?.mfa_verified) return res.status(403).json({ error: 'Verified platform admin access with MFA is required.' });
   try {
@@ -159,9 +161,7 @@ app.post('/api/auth/register', registrationUpload.single('resume'), async (req, 
     if(role==='candidate')await ensureRegistrationResumeSchema();
     await client.query('begin');
     const hash = await passwordHash(password);
-    // While no mail provider is configured, allow account setup without proving email ownership.
-    // Adding EMAIL_FROM and a mail provider re-enables verification for new accounts.
-    const user = (await client.query('insert into app_users(email,password_hash,email_verified_at) values($1,$2,$3) returning id,email', [email, hash, mailConfigured ? null : new Date()])).rows[0];
+    const user = (await client.query('insert into app_users(email,password_hash) values($1,$2) returning id,email', [email, hash])).rows[0];
     await client.query(`insert into user_profiles(id,full_name,account_role,account_status) values($1,$2,$3,'pending_terms')`, [user.id, fullName, role]);
     if (accountType === 'company') {
       const company = (await client.query(`insert into companies(created_by,name,website,verification_status) values($1,$2,$3,'pending') returning id`, [user.id, companyName, companyWebsite || null])).rows[0];
@@ -175,16 +175,24 @@ app.post('/api/auth/register', registrationUpload.single('resume'), async (req, 
       await saveResume(storedResumeKey, resumeFile.buffer, mimeByExt[ext]);
       await client.query('insert into registration_resume_staging(user_id,resume_key,resume_name) values($1,$2,$3)', [user.id, storedResumeKey, resumeFile.originalname.slice(0, 200)]);
     }
-    const token = mailConfigured ? opaqueToken() : null;
-    if (token) await client.query(`insert into auth_tokens(token_hash,user_id,purpose,expires_at) values($1,$2,'verify_email',now()+interval '1 day')`, [digest(token), user.id]);
+    let token;
+    if (developerMode) await client.query('update app_users set email_verified_at=now() where id=$1', [user.id]);
+    else {
+      token = opaqueToken();
+      await client.query(`insert into auth_tokens(token_hash,user_id,purpose,expires_at) values($1,$2,'verify_email',now()+interval '1 day')`, [digest(token), user.id]);
+    }
     await client.query('commit');
-    let emailSent = mailConfigured;
-    if (token) try { await sendMail(email, 'Verify your HRs Portal email', `Use this link to verify your email: ${webUrl(`/?auth=verify&token=${encodeURIComponent(token)}`)}\nThis link expires in 24 hours.`); } catch (mailError) { emailSent = false; console.error('Verification email delivery failed:', mailError.message); }
-    const verificationUrl = !emailSent && !production && localResumeRoot ? webUrl(`/?auth=verify&token=${encodeURIComponent(token)}`) : undefined;
-    const message = accountType === 'company'
+    let emailSent = false;
+    if (!developerMode) {
+      try { await sendMail(email, 'Verify your HRs Portal email', `Use this link to verify your email: ${webUrl(`/?auth=verify&token=${encodeURIComponent(token)}`)}\nThis link expires in 24 hours.`); emailSent = true; } catch (mailError) { console.error('Verification email delivery failed:', mailError.message); }
+    }
+    const verificationUrl = !developerMode && !emailSent && !production && localResumeRoot ? webUrl(`/?auth=verify&token=${encodeURIComponent(token)}`) : undefined;
+    const message = developerMode
+      ? accountType === 'company' ? 'Developer mode: your email is verified automatically. Company and recruiter access still need HRs Portal approval.' : 'Developer mode: your email is verified automatically. Continue to accept the terms.'
+      : accountType === 'company'
       ? emailSent ? 'Company request received. Verify your email; company and recruiter access stay pending until HRs Portal reviews them.' : verificationUrl ? 'Company request received. Use the local verification link; company and recruiter access stay pending until HRs Portal reviews them.' : 'Company request received, but the verification email could not be sent. Access remains pending until HRs Portal reviews the company.'
-      : emailSent ? 'Check your inbox for an email verification link.' : verificationUrl ? 'Local mode: use the verification link below to activate this account.' : 'Your account was created. Email verification is currently disabled.';
-    res.status(201).json({ message, emailVerificationRequired: mailConfigured, ...(verificationUrl ? { verificationUrl } : {}) });
+      : emailSent ? 'Check your inbox for an email verification link.' : verificationUrl ? 'Local mode: use the verification link below to activate this account.' : 'Your account was created, but the verification email could not be sent. Use Resend verification after email delivery is configured.';
+    res.status(201).json({ message, ...(verificationUrl ? { verificationUrl } : {}) });
   } catch (e) { await client.query('rollback'); if (storedResumeKey) await deleteResume(storedResumeKey).catch(()=>{}); if (e.code === '23505') return res.status(409).json({ error: 'If this address can be registered, check its inbox for next steps.' }); next(e); }
   finally { client.release(); }
 });
@@ -199,13 +207,14 @@ app.post('/api/auth/login', async (req, res, next) => {
       left join lateral (select m.company_id,m.role,m.status from company_memberships m join companies co on co.id=m.company_id where m.user_id=u.id order by (m.status='active' and co.verification_status='verified' and m.role='company_admin') desc,m.created_at desc limit 1) m on true
       left join companies c on c.id=m.company_id where u.email=$1`, [email]);
     if (!rows[0]?.password_hash || !(await passwordMatches(String(password || ''),rows[0].password_hash))) return res.status(401).json({ error: 'Email or password could not be confirmed.' });
+    if (developerMode && !rows[0].email_verified_at) {
+      await pool.query('update app_users set email_verified_at=now() where id=$1', [rows[0].id]);
+      const { rows: profileRows } = await pool.query(`update user_profiles set account_status=case when terms_accepted_at is null then 'pending_terms' when account_role='recruiter' then 'pending_approval' else 'active' end,updated_at=now() where id=$1 returning account_status`, [rows[0].id]);
+      rows[0].email_verified_at = new Date();
+      rows[0].account_status = profileRows[0]?.account_status || rows[0].account_status;
+    }
     if (!canAccessLoginPortal(portal, rows[0])) return res.status(403).json({ error: 'This account is not assigned to that sign-in portal. Use the correct portal or contact HRs Portal support.' });
     await pool.query('update app_users set last_sign_in_at=now() where id=$1', [rows[0].id]);
-    if (!mailConfigured && !rows[0].email_verified_at) {
-      await pool.query('update app_users set email_verified_at=now() where id=$1', [rows[0].id]);
-      await pool.query(`update user_profiles set account_status=case when terms_accepted_at is null then 'pending_terms' when account_role='recruiter' then 'pending_approval' else 'active' end,updated_at=now() where id=$1`, [rows[0].id]);
-      rows[0].email_verified_at = new Date();
-    }
     const isPlatformAdmin = ['admin', 'super_admin'].includes(rows[0].platform_role) && rows[0].platform_status === 'active';
     await createSession(rows[0].id, res, !isPlatformAdmin);
     const profile = (await pool.query('select id,full_name,account_role,account_status,onboarding_completed_at from user_profiles where id=$1', [rows[0].id])).rows[0];
@@ -271,7 +280,7 @@ app.post('/api/auth/change-password', requireAuth, async (req, res, next) => {
 app.post('/api/auth/accept-terms', requireAuth, async (req, res) => {
   const { fullName, role, termsVersion, accepted } = req.body || {};
   if (accepted !== true || termsVersion !== '2026-10-01' || !clean(fullName,120) || !['candidate','recruiter'].includes(role)) return res.status(400).json({ error: 'Check the required details and accept the current terms.' });
-  const status = !req.auth.email_verified_at ? 'pending_verification' : role === 'recruiter' ? 'pending_approval' : 'active';
+  const status = !req.auth.email_verified_at && !developerMode ? 'pending_verification' : role === 'recruiter' ? 'pending_approval' : 'active';
   const { rows } = await pool.query(`update user_profiles set full_name=$1,account_role=$2,account_status=$3,terms_version=$4,terms_accepted_at=now(),updated_at=now() where id=$5 and account_status='pending_terms' returning *`, [clean(fullName,120), role, status, termsVersion, req.auth.user_id]);
   if (!rows[0]) return res.status(409).json({ error: 'Registration terms were already accepted or this account is unavailable.' });
   res.json({ data: rows[0] });
@@ -307,6 +316,13 @@ app.get('/api/candidate-profile/staged-resume', requireAuth, requireVerified, as
   const {rows}=await pool.query('select resume_key as key,resume_name as name from registration_resume_staging where user_id=$1 and expires_at>now()',[req.auth.user_id]);
   res.json({resume:rows[0]||null});
 });
+const workspaceProjectTypes=new Set(['assistant_plan','resume','portfolio','learning','hiring_role','marketplace_request','provider_profile','video_storyboard']);
+const workspaceProjectStatuses=new Set(['draft','review','ready','archived']);
+const canManageHiring=async userId=>Boolean((await pool.query(`select 1 from company_memberships m join companies c on c.id=m.company_id where m.user_id=$1 and m.status='active' and c.verification_status='verified' limit 1`,[userId])).rows.length);
+app.get('/api/workspace/projects',requireAuth,requireVerified,async(req,res,next)=>{try{await ensureWorkspaceProjectsSchema();if(req.auth.account_status!=='active')return res.status(403).json({error:'Active account access is required.'});const type=clean(req.query.type,40);if(type&&!workspaceProjectTypes.has(type))return res.status(400).json({error:'Choose an available project type.'});const {rows}=await pool.query(`select id,project_type,title,status,content,created_at,updated_at from workspace_projects where owner_id=$1 and ($2='' or project_type=$2) order by updated_at desc limit 100`,[req.auth.user_id,type]);res.json({projects:rows});}catch(e){next(e)}});
+app.post('/api/workspace/projects',requireAuth,requireVerified,async(req,res,next)=>{try{await ensureWorkspaceProjectsSchema();if(req.auth.account_status!=='active')return res.status(403).json({error:'Active account access is required.'});const type=clean(req.body?.project_type,40),title=clean(req.body?.title,160),status=clean(req.body?.status,20)||'draft',content=req.body?.content??{};if(!workspaceProjectTypes.has(type)||!title||!workspaceProjectStatuses.has(status)||!content||typeof content!=='object'||Array.isArray(content)||JSON.stringify(content).length>100000)return res.status(400).json({error:'Check the project type, title, status, and content size.'});if(type==='hiring_role'&&(req.auth.account_role!=='recruiter'||!await canManageHiring(req.auth.user_id)))return res.status(403).json({error:'Hiring tools require an active recruiter in a verified company.'});const {rows}=await pool.query(`insert into workspace_projects(owner_id,project_type,title,status,content) values($1,$2,$3,$4,$5::jsonb) returning id,project_type,title,status,content,created_at,updated_at`,[req.auth.user_id,type,title,status,JSON.stringify(content)]);res.status(201).json({project:rows[0]});}catch(e){next(e)}});
+app.patch('/api/workspace/projects/:id',requireAuth,requireVerified,async(req,res,next)=>{try{await ensureWorkspaceProjectsSchema();if(!/^[0-9a-f-]{36}$/i.test(req.params.id))return res.status(400).json({error:'Choose a valid project.'});const {rows}=await pool.query('select * from workspace_projects where id=$1 and owner_id=$2',[req.params.id,req.auth.user_id]);if(!rows[0])return res.status(404).json({error:'Project not found.'});const type=clean(req.body?.project_type,40)||rows[0].project_type,title=clean(req.body?.title,160)||rows[0].title,status=clean(req.body?.status,20)||rows[0].status,content=req.body?.content??rows[0].content;if(!workspaceProjectTypes.has(type)||!title||!workspaceProjectStatuses.has(status)||!content||typeof content!=='object'||Array.isArray(content)||JSON.stringify(content).length>100000)return res.status(400).json({error:'Check the project type, title, status, and content size.'});if(type==='hiring_role'&&(req.auth.account_role!=='recruiter'||!await canManageHiring(req.auth.user_id)))return res.status(403).json({error:'Hiring tools require an active recruiter in a verified company.'});const result=await pool.query(`update workspace_projects set project_type=$1,title=$2,status=$3,content=$4::jsonb,updated_at=now() where id=$5 and owner_id=$6 returning id,project_type,title,status,content,created_at,updated_at`,[type,title,status,JSON.stringify(content),req.params.id,req.auth.user_id]);res.json({project:result.rows[0]});}catch(e){next(e)}});
+app.delete('/api/workspace/projects/:id',requireAuth,requireVerified,async(req,res,next)=>{try{await ensureWorkspaceProjectsSchema();if(!/^[0-9a-f-]{36}$/i.test(req.params.id))return res.status(400).json({error:'Choose a valid project.'});const {rowCount}=await pool.query('delete from workspace_projects where id=$1 and owner_id=$2',[req.params.id,req.auth.user_id]);if(!rowCount)return res.status(404).json({error:'Project not found.'});res.json({ok:true});}catch(e){next(e)}});
 const resumeUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 }, fileFilter: (_req,file,cb) => /\.(pdf|doc|docx)$/i.test(file.originalname) ? cb(null,true) : cb(Object.assign(new Error('Choose a PDF, DOC or DOCX resume.'),{status:400})) });
 app.post('/api/resumes', requireAuth, requireVerified, resumeUpload.single('resume'), async (req,res,next) => {
   try {

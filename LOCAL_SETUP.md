@@ -1,28 +1,12 @@
-# Run HRs Portal locally on Windows, macOS, or Linux
+# Run HRs Portal locally at no service cost
 
 This setup runs the Node API, PostgreSQL, local resume storage, and Career Copilot on your computer. It does not send resumes to a paid AI service.
 
-## Windows prerequisites
+## Start
 
-1. Install [Node.js 22 LTS](https://nodejs.org/) (the installer adds Node and npm to PowerShell).
-2. Install PostgreSQL for Windows and create a local database named `hrs_portal_dev`.
-3. Optional: install [Ollama for Windows](https://ollama.com/download/windows) only if you want the local Career Copilot features.
-4. From PowerShell, open the real project folder — not `__MACOSX`:
-
-```powershell
-cd "C:\Users\Asus\Desktop\Projects\hr care\hr care"
-npm --prefix backend install
-npm run start:local
-```
-
-The app opens at [http://localhost:4173](http://localhost:4173). Press `Ctrl+C` in the same PowerShell window to stop it. The local launcher now uses Node for the web server, so Python is not required on Windows.
-
-## Start on any supported operating system
-
-The local `.env` file is already configured for the available PostgreSQL and Ollama services on this computer. Install the backend packages once, start PostgreSQL and Ollama if they are not already running, then run:
+The local `.env` file is already configured for the available PostgreSQL and Ollama services on this computer. Start PostgreSQL and Ollama if they are not already running, then run:
 
 ```sh
-npm --prefix backend install
 npm run start:local
 ```
 

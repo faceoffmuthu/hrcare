@@ -11,15 +11,17 @@ services:
       - key: NODE_ENV
         value: production
       - key: APP_ORIGIN
-        value: https://hrcare.onrender.com
+        value: https://hrs-portal.lemony-badge-5690.chatgpt.site
       - key: DATABASE_URL
         sync: false
       - key: DATABASE_SSL
         value: "true"
-      - key: S3_REGION
-        value: "us-east-2"
       - key: SESSION_SECRET
         generateValue: true
+      - key: EMAIL_FROM
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET

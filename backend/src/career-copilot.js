@@ -18,16 +18,10 @@ export function rankCareerJobs(profile, jobs) {
 export async function extractResumeText(buffer, extension) {
   let text = '';
   if (extension === 'pdf') {
-    let parser;
-    try {
-      const { PDFParse } = await import('pdf-parse');
-      parser = new PDFParse({ data: buffer });
-      text = (await parser.getText()).text;
-    } catch (error) {
-      throw Object.assign(new Error('PDF resume processing is unavailable. Run `npm --prefix backend install` again, then restart the app.'), { status: 503, cause: error });
-    } finally {
-      await parser?.destroy();
-    }
+    const { PDFParse } = await import('pdf-parse');
+    const parser = new PDFParse({ data: buffer });
+    try { text = (await parser.getText()).text; }
+    finally { await parser.destroy(); }
   } else if (extension === 'docx') {
     const start = Math.max(0, buffer.length - 65_557);
     let eocd = -1;

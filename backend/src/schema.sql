@@ -81,6 +81,17 @@ create table if not exists registration_resume_staging (
   expires_at timestamptz not null default now() + interval '7 days',
   created_at timestamptz not null default now()
 );
+create table if not exists workspace_projects (
+  id uuid primary key default gen_random_uuid(),
+  owner_id uuid not null references app_users(id) on delete cascade,
+  project_type text not null check (project_type in ('assistant_plan','resume','portfolio','learning','hiring_role','marketplace_request','provider_profile','video_storyboard')),
+  title text not null check (char_length(title) between 1 and 160),
+  status text not null default 'draft' check (status in ('draft','review','ready','archived')),
+  content jsonb not null default '{}'::jsonb,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create index if not exists workspace_projects_owner_type_idx on workspace_projects(owner_id,project_type,updated_at desc);
 create table if not exists companies (
   id uuid primary key default gen_random_uuid(),
   created_by uuid not null references app_users(id) on delete restrict,

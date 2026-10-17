@@ -22,7 +22,6 @@
     "express": "^5.1.0",
     "express-rate-limit": "^7.5.0",
     "helmet": "^8.1.0",
-    "hrs-portal": "file:..",
     "jose": "^6.0.11",
     "multer": "^2.0.0",
     "nodemailer": "^10.1.0",

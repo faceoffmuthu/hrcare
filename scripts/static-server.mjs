@@ -10,6 +10,7 @@ const mimeTypes = {
   '.css': 'text/css; charset=utf-8',
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
   '.map': 'application/json; charset=utf-8',
   '.svg': 'image/svg+xml',
@@ -43,7 +44,6 @@ const server = createServer(async (request, response) => {
   try {
     if ((await stat(file)).isDirectory()) file = path.join(file, 'index.html');
   } catch {
-    // The browser app uses client-side routes, so fall back to the application shell.
     file = path.join(root, 'index.html');
   }
 
